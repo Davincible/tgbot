@@ -1,0 +1,462 @@
+package tgbot
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gammazero/workerpool"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+	"golang.org/x/exp/slog"
+)
+
+var (
+	// allowedUpdates is hardcoded to make sure we receive the reaction updates,
+	// which need to be explicitly requested.
+	allowedUpdates = []string{
+		"message",
+		"edited_message",
+		"channel_post",
+		"edited_channel_post",
+		"business_connection",
+		"business_message",
+		"edited_business_message",
+		"deleted_business_messages",
+		"message_reaction",
+		"message_reaction_count",
+		"inline_query",
+		"chosen_inline_result",
+		"callback_query",
+		"shipping_query",
+		"pre_checkout_query",
+		"poll",
+		"poll_answer",
+		"my_chat_member",
+		"chat_member",
+		"chat_join_request",
+		"chat_boost",
+		"removed_chat_boost",
+	}
+)
+
+var (
+	ErrNilLogger = errors.New("logger not provided")
+	ErrNilConfig = errors.New("config not provided")
+)
+
+var _ Sender = (*Service)(nil)
+
+type Sender interface {
+	Send(userID int64, msg Message) error
+	DownloadFile(fileID any) ([]byte, error)
+}
+
+type CallBack struct {
+	Handler   bot.HandlerFunc
+	MatchType bot.MatchType
+}
+
+type Bot interface {
+	SetSender(b Sender)
+	Commands() map[string]func(ctx context.Context, b *bot.Bot, update *models.Update)
+	CommandsList() []models.BotCommand
+	CallBacks() map[string]CallBack
+	Middleware() []bot.Middleware
+	DefaultHandler() bot.HandlerFunc
+}
+
+type Config struct {
+	Bot           Bot
+	Token         string
+	WebhookURL    string
+	WebhookSecret string
+	UseWebhook    bool
+	Polling       bool
+	// SkipGetMe skips the GetMe call on bot creation.
+	SkippGetMe bool
+}
+
+type Service struct {
+	cfg    *Config
+	logger *slog.Logger
+	bot    *bot.Bot
+	pool   *workerpool.WorkerPool
+}
+
+func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
+	if logger == nil {
+		return nil, ErrNilLogger
+	}
+
+	if cfg == nil {
+		return nil, ErrNilConfig
+	}
+
+	logger.Debug("Creating Telegram bot")
+
+	options := []bot.Option{
+		bot.WithAllowedUpdates(allowedUpdates),
+		bot.WithCheckInitTimeout(15 * time.Second),
+		bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			if update.Message == nil {
+				return
+			}
+
+			// If commands are called from a caption, e.g. image, video, or document, they are not registered by default
+			if cfg.Bot != nil {
+				for command, handler := range cfg.Bot.Commands() {
+					if strings.HasPrefix(update.Message.Text, command) {
+						handler(ctx, b, update)
+						return
+					}
+
+					if update.Message.Caption != "" && strings.HasPrefix(update.Message.Caption, command) {
+						handler(ctx, b, update)
+						return
+					}
+				}
+			}
+		}),
+		bot.WithDebugHandler(func(format string, args ...any) {
+			logger.Debug(fmt.Sprintf(format, args...))
+		}),
+		bot.WithErrorsHandler(func(err error) {
+			logger.Error(err.Error())
+		}),
+	}
+
+	if cfg.Bot != nil {
+		for pattern, callback := range cfg.Bot.CallBacks() {
+			options = append(options, bot.WithCallbackQueryDataHandler(pattern, callback.MatchType, callback.Handler))
+		}
+
+		if middleware := cfg.Bot.Middleware(); len(middleware) > 0 {
+			options = append(options, bot.WithMiddlewares(middleware...))
+		}
+
+		if defaultHandler := cfg.Bot.DefaultHandler(); defaultHandler != nil {
+			options = append(options, bot.WithDefaultHandler(defaultHandler))
+		}
+	}
+
+	b, err := bot.New(cfg.Token, options...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bot: %w", err)
+	}
+
+	srv := Service{
+		cfg:    cfg,
+		logger: logger,
+		bot:    b,
+		pool:   workerpool.New(50),
+	}
+
+	if cfg.Bot != nil {
+		cfg.Bot.SetSender(&srv)
+
+		for command, handler := range cfg.Bot.Commands() {
+			b.RegisterHandler(bot.HandlerTypeMessageText, command, bot.MatchTypePrefix, handler)
+		}
+
+		if commandList := cfg.Bot.CommandsList(); len(commandList) > 0 {
+			if _, err = b.SetMyCommands(context.Background(), &bot.SetMyCommandsParams{
+				Commands:     commandList,
+				LanguageCode: "en",
+			}); err != nil {
+				logger.Error("failed to set bot commands", slog.String("err", err.Error()))
+			}
+		}
+	}
+
+	if cfg.UseWebhook {
+		logger.Debug("Setting up Telegram webhook", slog.String("url", cfg.WebhookURL))
+
+		if len(cfg.WebhookURL) == 0 {
+			return nil, fmt.Errorf("webhook setup requested but no webhook url provided")
+		}
+
+		// Randomly generate a secret token if none is provided
+		if len(cfg.WebhookSecret) == 0 {
+			secret := fmt.Sprintf("%s-%d", cfg.Token, time.Now().UnixNano())
+			cfg.WebhookSecret = string(sha256.New().Sum([]byte(secret)))
+		}
+
+		if _, err = b.DeleteWebhook(context.Background(), &bot.DeleteWebhookParams{
+			DropPendingUpdates: false,
+		}); err != nil {
+			logger.Error("failed to delete webhook", slog.String("err", err.Error()))
+		}
+
+		if _, err = b.SetWebhook(context.Background(), &bot.SetWebhookParams{
+			URL:            cfg.WebhookURL,
+			SecretToken:    cfg.WebhookSecret,
+			AllowedUpdates: allowedUpdates,
+		}); err != nil {
+			logger.Error("failed to set webhook", slog.String("err", err.Error()))
+		}
+
+		go b.StartWebhook(context.Background())
+	} else if cfg.Polling {
+		go b.Start(context.Background())
+	}
+
+	if !cfg.SkippGetMe {
+		self, err := b.GetMe(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get bot info: %w", err)
+		}
+
+		logger.Debug("Telegram connected", slog.String("bot", self.Username))
+	} else {
+		logger.Debug("Telegram connected")
+	}
+
+	return &srv, nil
+}
+
+type Message struct {
+	Text               string
+	VideoURL           string
+	AudioURL           string
+	ImageURL           string
+	DocumentType       string
+	DocumentURL        string
+	Document           []byte
+	Image              []byte
+	Audio              []byte
+	Video              []byte
+	Entities           []models.MessageEntity
+	Buttons            []InlineButton
+	ReplyTo            int
+	TextFormatting     bool
+	DisableLinkPreview bool
+}
+
+type InlineButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+	URL          string `json:"url"`
+
+	Row []InlineButton `json:"row,omitempty"`
+}
+
+func (s *Service) Send(chatID int64, msg Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Helper function to handle errors and log them
+	handleErr := func(msgType string, err error) error {
+		if err != nil {
+			s.logger.Error("Error sending message",
+				slog.String("err", err.Error()),
+				slog.String("type", msgType),
+				slog.String("text", EscapeMarkdown(msg.Text, msg.TextFormatting)),
+			)
+
+			if strings.Contains(err.Error(), "too long") {
+				s.Send(chatID, Message{
+					Text: "Message is too long, try a shorter message or without attachment",
+				})
+			}
+		}
+		return err
+	}
+
+	var replyParams *models.ReplyParameters
+	if msg.ReplyTo > 0 {
+		replyParams = &models.ReplyParameters{
+			ChatID:                   chatID,
+			MessageID:                msg.ReplyTo,
+			AllowSendingWithoutReply: true,
+		}
+	}
+
+	switch {
+	case len(msg.Image) > 0 || msg.ImageURL != "":
+		if _, err := s.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:          chatID,
+			Photo:           createInputFile("image.jpg", msg.Image, msg.ImageURL),
+			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
+			ParseMode:       getParseMode(msg.TextFormatting),
+			ReplyMarkup:     createInlineKeyboard(msg),
+			ReplyParameters: replyParams,
+			CaptionEntities: msg.Entities,
+		}); err != nil {
+			return handleErr("image", err)
+		}
+	case len(msg.Video) > 0 || msg.VideoURL != "":
+		if _, err := s.bot.SendVideo(ctx, &bot.SendVideoParams{
+			ChatID:          chatID,
+			Video:           createInputFile("video.mp4", msg.Video, msg.VideoURL),
+			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
+			ParseMode:       getParseMode(msg.TextFormatting),
+			ReplyMarkup:     createInlineKeyboard(msg),
+			ReplyParameters: replyParams,
+			CaptionEntities: msg.Entities,
+		}); err != nil {
+			return handleErr("video", err)
+		}
+	case len(msg.Audio) > 0 || msg.AudioURL != "":
+		if _, err := s.bot.SendAudio(ctx, &bot.SendAudioParams{
+			ChatID:          chatID,
+			Audio:           createInputFile("audio.mp3", msg.Audio, msg.AudioURL),
+			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
+			ParseMode:       getParseMode(msg.TextFormatting),
+			ReplyMarkup:     createInlineKeyboard(msg),
+			ReplyParameters: replyParams,
+			CaptionEntities: msg.Entities,
+		}); err != nil {
+			return handleErr("audio", err)
+		}
+	case msg.DocumentURL != "" || len(msg.Document) > 0:
+		if _, err := s.bot.SendDocument(ctx, &bot.SendDocumentParams{
+			ChatID:          chatID,
+			Document:        createInputFile("file."+msg.DocumentType, msg.Document, msg.DocumentURL),
+			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
+			ParseMode:       getParseMode(msg.TextFormatting),
+			ReplyMarkup:     createInlineKeyboard(msg),
+			ReplyParameters: replyParams,
+			CaptionEntities: msg.Entities,
+		}); err != nil {
+			return handleErr("document", err)
+		}
+	case msg.Text != "":
+		var previewOpts *models.LinkPreviewOptions
+		if msg.DisableLinkPreview {
+			t := true
+			previewOpts = &models.LinkPreviewOptions{
+				IsDisabled: &t,
+			}
+		}
+
+		if _, err := s.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:             chatID,
+			Text:               EscapeMarkdown(msg.Text, msg.TextFormatting),
+			ParseMode:          getParseMode(msg.TextFormatting),
+			ReplyMarkup:        createInlineKeyboard(msg),
+			ReplyParameters:    replyParams,
+			Entities:           msg.Entities,
+			LinkPreviewOptions: previewOpts,
+		}); err != nil {
+			return handleErr("text", err)
+		}
+	default:
+		return errors.New("unsupported message type")
+	}
+
+	return nil
+}
+
+func (s *Service) WebhookHandler() http.HandlerFunc {
+	return s.bot.WebhookHandler()
+}
+
+func (s *Service) Close() {
+	s.pool.StopWait()
+}
+
+func (s *Service) SendTyping(chatID int64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := s.bot.SendChatAction(ctx, &bot.SendChatActionParams{
+		ChatID: chatID,
+		Action: models.ChatActionTyping,
+	}); err != nil {
+		return fmt.Errorf("failed to send typing action: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Service) DownloadFile(fileID any) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	defer cancel()
+
+	file, err := s.bot.GetFile(ctx, &bot.GetFileParams{
+		FileID: fmt.Sprintf("%v", fileID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get file: %w", err)
+	}
+
+	body, err := downloadFile(fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.cfg.Token, file.FilePath))
+	if err != nil {
+		return nil, fmt.Errorf("download file: %w", err)
+	}
+
+	return body, nil
+}
+
+func (s *Service) GetChat(chatID int64) (*models.ChatFullInfo, error) {
+	return s.bot.GetChat(context.Background(), &bot.GetChatParams{
+		ChatID: chatID,
+	})
+}
+
+func (s *Service) GetChatMember(chat, user int64) (*models.ChatMember, error) {
+	return s.bot.GetChatMember(context.Background(), &bot.GetChatMemberParams{
+		ChatID: chat,
+		UserID: user,
+	})
+}
+
+func (s *Service) GetMe() (*models.User, error) {
+	return s.bot.GetMe(context.Background())
+}
+
+func (s *Service) GetProfilePhoto(chatID int64) ([]byte, error) {
+	fmt.Println("CHECKING PICTURE:", chatID)
+
+	var fileID string
+	p, err := s.bot.GetUserProfilePhotos(context.Background(), &bot.GetUserProfilePhotosParams{
+		UserID: chatID,
+		Limit:  1,
+	})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "user not found") {
+			return nil, errors.New("user not found")
+		}
+
+		// return nil, fmt.Errorf("get user profile photos: %w", err)
+		s.logger.Warn("Failed to get user profile photos", slog.String("err", err.Error()))
+		chat, err := s.GetChat(chatID)
+		if err != nil {
+			return nil, fmt.Errorf("get chat: %w", err)
+		}
+
+		if chat.Photo == nil {
+			return nil, errors.New("no photos found")
+		}
+
+		fileID = chat.Photo.BigFileID
+	} else {
+		if len(p.Photos) == 0 || len(p.Photos[0]) == 0 {
+			return nil, errors.New("no photos found")
+		}
+
+		getBestPhoto := func(photos [][]models.PhotoSize) *models.PhotoSize {
+			var best *models.PhotoSize
+			for _, photo := range photos[0] {
+				if best == nil || photo.Width > best.Width {
+					best = &photo
+				}
+			}
+			return best
+		}
+
+		best := getBestPhoto(p.Photos)
+		fileID = best.FileID
+	}
+
+	if len(fileID) == 0 {
+		return nil, errors.New("no picture found")
+	}
+
+	return s.DownloadFile(fileID)
+}
