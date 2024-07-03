@@ -52,7 +52,9 @@ var (
 var _ Sender = (*Service)(nil)
 
 type Sender interface {
-	Send(userID int64, msg Message) error
+	Send(userID int64, msg Message) (*models.Message, error)
+	EditMessage(chatID int64, msgID int, msg Message) (*models.Message, error)
+	DeleteMessage(chatID int64, msgID int) error
 	DownloadFile(fileID any) ([]byte, error)
 }
 
@@ -237,6 +239,54 @@ type Message struct {
 	DisableLinkPreview bool
 }
 
+// hasMedia returns true if the message has any media attachments.
+func (m Message) hasMedia() bool {
+	return m.VideoURL != "" || m.AudioURL != "" || m.ImageURL != "" ||
+		len(m.Document) > 0 || len(m.Image) > 0 || len(m.Audio) > 0 ||
+		len(m.Video) > 0 || m.DocumentURL != "" || m.DocumentType != ""
+}
+
+// createInputMedia
+func (m Message) createInputFile() models.InputMedia {
+	if len(m.Image) > 0 || m.ImageURL != "" {
+		return &models.InputMediaPhoto{
+			Media:           m.ImageURL,
+			Caption:         m.Text,
+			ParseMode:       getParseMode(m.TextFormatting),
+			CaptionEntities: m.Entities,
+		}
+	}
+
+	if len(m.Video) > 0 || m.VideoURL != "" {
+		return &models.InputMediaVideo{
+			Media:           m.VideoURL,
+			Caption:         m.Text,
+			ParseMode:       getParseMode(m.TextFormatting),
+			CaptionEntities: m.Entities,
+		}
+	}
+
+	if len(m.Audio) > 0 || m.AudioURL != "" {
+		return &models.InputMediaAudio{
+			Media:           m.AudioURL,
+			Caption:         m.Text,
+			ParseMode:       getParseMode(m.TextFormatting),
+			CaptionEntities: m.Entities,
+		}
+	}
+
+	if len(m.Document) > 0 || m.DocumentURL != "" {
+		return &models.InputMediaDocument{
+			Media:           m.DocumentURL,
+			Caption:         m.Text,
+			ParseMode:       getParseMode(m.TextFormatting),
+			CaptionEntities: m.Entities,
+		}
+	}
+
+	return nil
+}
+
 type InlineButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
@@ -245,7 +295,7 @@ type InlineButton struct {
 	Row []InlineButton `json:"row,omitempty"`
 }
 
-func (s *Service) Send(chatID int64, msg Message) error {
+func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -276,9 +326,12 @@ func (s *Service) Send(chatID int64, msg Message) error {
 		}
 	}
 
+	var returnMsg *models.Message
+	var err error
+
 	switch {
 	case len(msg.Image) > 0 || msg.ImageURL != "":
-		if _, err := s.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+		if returnMsg, err = s.bot.SendPhoto(ctx, &bot.SendPhotoParams{
 			ChatID:          chatID,
 			Photo:           createInputFile("image.jpg", msg.Image, msg.ImageURL),
 			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
@@ -287,10 +340,10 @@ func (s *Service) Send(chatID int64, msg Message) error {
 			ReplyParameters: replyParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
-			return handleErr("image", err)
+			return returnMsg, handleErr("image", err)
 		}
 	case len(msg.Video) > 0 || msg.VideoURL != "":
-		if _, err := s.bot.SendVideo(ctx, &bot.SendVideoParams{
+		if returnMsg, err = s.bot.SendVideo(ctx, &bot.SendVideoParams{
 			ChatID:          chatID,
 			Video:           createInputFile("video.mp4", msg.Video, msg.VideoURL),
 			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
@@ -299,10 +352,10 @@ func (s *Service) Send(chatID int64, msg Message) error {
 			ReplyParameters: replyParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
-			return handleErr("video", err)
+			return returnMsg, handleErr("video", err)
 		}
 	case len(msg.Audio) > 0 || msg.AudioURL != "":
-		if _, err := s.bot.SendAudio(ctx, &bot.SendAudioParams{
+		if returnMsg, err = s.bot.SendAudio(ctx, &bot.SendAudioParams{
 			ChatID:          chatID,
 			Audio:           createInputFile("audio.mp3", msg.Audio, msg.AudioURL),
 			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
@@ -311,10 +364,10 @@ func (s *Service) Send(chatID int64, msg Message) error {
 			ReplyParameters: replyParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
-			return handleErr("audio", err)
+			return returnMsg, handleErr("audio", err)
 		}
 	case msg.DocumentURL != "" || len(msg.Document) > 0:
-		if _, err := s.bot.SendDocument(ctx, &bot.SendDocumentParams{
+		if returnMsg, err = s.bot.SendDocument(ctx, &bot.SendDocumentParams{
 			ChatID:          chatID,
 			Document:        createInputFile("file."+msg.DocumentType, msg.Document, msg.DocumentURL),
 			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
@@ -323,7 +376,7 @@ func (s *Service) Send(chatID int64, msg Message) error {
 			ReplyParameters: replyParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
-			return handleErr("document", err)
+			return returnMsg, handleErr("document", err)
 		}
 	case msg.Text != "":
 		var previewOpts *models.LinkPreviewOptions
@@ -334,7 +387,7 @@ func (s *Service) Send(chatID int64, msg Message) error {
 			}
 		}
 
-		if _, err := s.bot.SendMessage(ctx, &bot.SendMessageParams{
+		if returnMsg, err = s.bot.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:             chatID,
 			Text:               EscapeMarkdown(msg.Text, msg.TextFormatting),
 			ParseMode:          getParseMode(msg.TextFormatting),
@@ -343,10 +396,89 @@ func (s *Service) Send(chatID int64, msg Message) error {
 			Entities:           msg.Entities,
 			LinkPreviewOptions: previewOpts,
 		}); err != nil {
-			return handleErr("text", err)
+			return returnMsg, handleErr("text", err)
 		}
 	default:
-		return errors.New("unsupported message type")
+		return returnMsg, errors.New("unsupported message type")
+	}
+
+	return returnMsg, nil
+}
+
+func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var previewOpts *models.LinkPreviewOptions
+	if msg.DisableLinkPreview {
+		t := true
+		previewOpts = &models.LinkPreviewOptions{
+			IsDisabled: &t,
+		}
+	}
+
+	var returnMsg *models.Message
+	var err error
+
+	if len(msg.Text) > 0 {
+		returnMsg, err = s.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:             chatID,
+			MessageID:          int(msgID),
+			Text:               EscapeMarkdown(msg.Text, msg.TextFormatting),
+			ParseMode:          getParseMode(msg.TextFormatting),
+			ReplyMarkup:        createInlineKeyboard(msg),
+			Entities:           msg.Entities,
+			LinkPreviewOptions: previewOpts,
+		})
+		if err != nil {
+			if strings.Contains(err.Error(), "there is no text in the message to edit") {
+				returnMsg, err = s.bot.EditMessageCaption(ctx, &bot.EditMessageCaptionParams{
+					ChatID:                chatID,
+					MessageID:             int(msgID),
+					Caption:               EscapeMarkdown(msg.Text, msg.TextFormatting),
+					ParseMode:             getParseMode(msg.TextFormatting),
+					CaptionEntities:       msg.Entities,
+					DisableWebPagePreview: msg.DisableLinkPreview,
+					ReplyMarkup:           createInlineKeyboard(msg),
+				})
+				if err != nil {
+					return nil, fmt.Errorf("edit Telegram caption: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("edit Telegram message: %w", err)
+			}
+		}
+	}
+
+	if msg.hasMedia() {
+		returnMsg, err = s.bot.EditMessageMedia(ctx, &bot.EditMessageMediaParams{
+			ChatID:      chatID,
+			MessageID:   int(msgID),
+			Media:       msg.createInputFile(),
+			ReplyMarkup: createInlineKeyboard(msg),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("edit Telegram media: %w", err)
+		}
+	}
+
+	return returnMsg, nil
+}
+
+func (s *Service) DeleteMessage(chatID int64, msgID int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	deleted, err := s.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		ChatID:    chatID,
+		MessageID: msgID,
+	})
+	if err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+
+	if !deleted {
+		return errors.New("unable to delete Telegram message")
 	}
 
 	return nil
