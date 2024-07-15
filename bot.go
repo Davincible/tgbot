@@ -196,6 +196,15 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 		}
 	}
 
+	if _, err = b.DeleteWebhook(context.Background(), &bot.DeleteWebhookParams{
+		DropPendingUpdates: false,
+	}); err != nil {
+		logger.Error("failed to delete webhook",
+			slog.String("err", err.Error()),
+			slog.String("bot", username),
+		)
+	}
+
 	if cfg.UseWebhook {
 		logger.Debug("Setting up Telegram webhook", slog.String("url", cfg.WebhookURL))
 
@@ -208,15 +217,6 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 			t := strings.Split(cfg.Token, ":")[0]
 			secret := fmt.Sprintf("%s-%d", t, time.Now().UnixNano())
 			cfg.WebhookSecret = hex.EncodeToString(sha256.New().Sum([]byte(secret)))
-		}
-
-		if _, err = b.DeleteWebhook(context.Background(), &bot.DeleteWebhookParams{
-			DropPendingUpdates: false,
-		}); err != nil {
-			logger.Error("failed to delete webhook",
-				slog.String("err", err.Error()),
-				slog.String("bot", username),
-			)
 		}
 
 		if _, err = b.SetWebhook(context.Background(), &bot.SetWebhookParams{
