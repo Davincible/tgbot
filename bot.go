@@ -3,6 +3,7 @@ package tgbot
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -101,34 +102,20 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 
 	logger.Debug("Creating Telegram bot")
 
+	var username string
+
 	options := []bot.Option{
 		bot.WithAllowedUpdates(allowedUpdates),
 		bot.WithCheckInitTimeout(15 * time.Second),
 		bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, update *models.Update) {
-			if update.Message == nil {
-				return
-			}
-
-			// If commands are called from a caption, e.g. image, video, or document, they are not registered by default
-			if cfg.Bot != nil {
-				for command, handler := range cfg.Bot.Commands() {
-					if strings.HasPrefix(update.Message.Text, command) {
-						handler(ctx, b, update)
-						return
-					}
-
-					if update.Message.Caption != "" && strings.HasPrefix(update.Message.Caption, command) {
-						handler(ctx, b, update)
-						return
-					}
-				}
-			}
 		}),
 		bot.WithDebugHandler(func(format string, args ...any) {
 			logger.Debug(fmt.Sprintf(format, args...))
 		}),
 		bot.WithErrorsHandler(func(err error) {
-			logger.Error(err.Error())
+			logger.Error(err.Error(),
+				slog.String("bot", username),
+			)
 		}),
 	}
 
@@ -138,7 +125,28 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 		}
 
 		if middleware := cfg.Bot.Middleware(); len(middleware) > 0 {
-			options = append(options, bot.WithMiddlewares(middleware...))
+			captionCmdMiddleware := func(next bot.HandlerFunc) bot.HandlerFunc {
+				return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+					// If commands are called from a caption, e.g. image, video, or document, they are not registered by default
+					if update.Message != nil && update.Message.Caption != "" && cfg.Bot != nil {
+						for command, handler := range cfg.Bot.Commands() {
+							if strings.HasPrefix(update.Message.Text, command) {
+								handler(ctx, b, update)
+								return
+							}
+
+							if update.Message.Caption != "" && strings.HasPrefix(update.Message.Caption, command) {
+								handler(ctx, b, update)
+								return
+							}
+						}
+					}
+
+					next(ctx, b, update)
+				}
+			}
+
+			options = append(options, bot.WithMiddlewares(append(middleware, captionCmdMiddleware)...))
 		}
 
 		if defaultHandler := cfg.Bot.DefaultHandler(); defaultHandler != nil {
@@ -149,6 +157,15 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 	b, err := bot.New(cfg.Token, options...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
+	}
+
+	if !cfg.SkippGetMe {
+		self, err := b.GetMe(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get bot info: %w", err)
+		}
+
+		username = self.Username
 	}
 
 	srv := Service{
@@ -170,7 +187,11 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 				Commands:     commandList,
 				LanguageCode: "en",
 			}); err != nil {
-				logger.Error("failed to set bot commands", slog.String("err", err.Error()))
+				logger.Error("failed to set bot commands",
+					slog.String("err", err.Error()),
+
+					slog.String("bot", username),
+				)
 			}
 		}
 	}
@@ -184,14 +205,18 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 
 		// Randomly generate a secret token if none is provided
 		if len(cfg.WebhookSecret) == 0 {
-			secret := fmt.Sprintf("%s-%d", cfg.Token, time.Now().UnixNano())
-			cfg.WebhookSecret = string(sha256.New().Sum([]byte(secret)))
+			t := strings.Split(cfg.Token, ":")[0]
+			secret := fmt.Sprintf("%s-%d", t, time.Now().UnixNano())
+			cfg.WebhookSecret = hex.EncodeToString(sha256.New().Sum([]byte(secret)))
 		}
 
 		if _, err = b.DeleteWebhook(context.Background(), &bot.DeleteWebhookParams{
 			DropPendingUpdates: false,
 		}); err != nil {
-			logger.Error("failed to delete webhook", slog.String("err", err.Error()))
+			logger.Error("failed to delete webhook",
+				slog.String("err", err.Error()),
+				slog.String("bot", username),
+			)
 		}
 
 		if _, err = b.SetWebhook(context.Background(), &bot.SetWebhookParams{
@@ -199,7 +224,12 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 			SecretToken:    cfg.WebhookSecret,
 			AllowedUpdates: allowedUpdates,
 		}); err != nil {
-			logger.Error("failed to set webhook", slog.String("err", err.Error()))
+			logger.Error("failed to set webhook",
+				slog.String("err", err.Error()),
+				slog.String("secret", cfg.WebhookSecret),
+				slog.String("url", cfg.WebhookURL),
+				slog.String("bot", username),
+			)
 		}
 
 		go b.StartWebhook(context.Background())
@@ -207,13 +237,8 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 		go b.Start(context.Background())
 	}
 
-	if !cfg.SkippGetMe {
-		self, err := b.GetMe(context.Background())
-		if err != nil {
-			return nil, fmt.Errorf("failed to get bot info: %w", err)
-		}
-
-		logger.Debug("Telegram connected", slog.String("bot", self.Username))
+	if len(username) > 0 {
+		logger.Debug("Telegram connected", slog.String("bot", username))
 	} else {
 		logger.Debug("Telegram connected")
 	}
