@@ -57,6 +57,7 @@ type Sender interface {
 	EditMessage(chatID int64, msgID int, msg Message) (*models.Message, error)
 	DeleteMessage(chatID int64, msgID int) error
 	DownloadFile(fileID any) ([]byte, error)
+	BotUsername() string
 }
 
 type CallBack struct {
@@ -89,6 +90,8 @@ type Service struct {
 	logger *slog.Logger
 	bot    *bot.Bot
 	pool   *workerpool.WorkerPool
+
+	username string
 }
 
 func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
@@ -169,10 +172,11 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 	}
 
 	srv := Service{
-		cfg:    cfg,
-		logger: logger,
-		bot:    b,
-		pool:   workerpool.New(50),
+		cfg:      cfg,
+		logger:   logger,
+		bot:      b,
+		pool:     workerpool.New(50),
+		username: username,
 	}
 
 	if cfg.Bot != nil {
@@ -616,4 +620,22 @@ func (s *Service) GetProfilePhoto(chatID int64) ([]byte, error) {
 	}
 
 	return s.DownloadFile(fileID)
+}
+
+func (s *Service) BotUsername() string {
+	if len(s.username) > 0 {
+		return s.username
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	user, err := s.bot.GetMe(ctx)
+	if err != nil {
+		return ""
+	}
+
+	s.username = user.Username
+
+	return user.Username
 }
