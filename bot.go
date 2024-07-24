@@ -280,7 +280,7 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Image) > 0 || m.ImageURL != "" {
 		return &models.InputMediaPhoto{
 			Media:           m.ImageURL,
-			Caption:         m.Text,
+			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
 			ParseMode:       getParseMode(m.TextFormatting),
 			CaptionEntities: m.Entities,
 		}
@@ -289,7 +289,7 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Video) > 0 || m.VideoURL != "" {
 		return &models.InputMediaVideo{
 			Media:           m.VideoURL,
-			Caption:         m.Text,
+			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
 			ParseMode:       getParseMode(m.TextFormatting),
 			CaptionEntities: m.Entities,
 		}
@@ -298,7 +298,7 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Audio) > 0 || m.AudioURL != "" {
 		return &models.InputMediaAudio{
 			Media:           m.AudioURL,
-			Caption:         m.Text,
+			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
 			ParseMode:       getParseMode(m.TextFormatting),
 			CaptionEntities: m.Entities,
 		}
@@ -307,7 +307,7 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Document) > 0 || m.DocumentURL != "" {
 		return &models.InputMediaDocument{
 			Media:           m.DocumentURL,
-			Caption:         m.Text,
+			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
 			ParseMode:       getParseMode(m.TextFormatting),
 			CaptionEntities: m.Entities,
 		}
@@ -449,7 +449,17 @@ func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Mes
 	var returnMsg *models.Message
 	var err error
 
-	if len(msg.Text) > 0 {
+	if msg.hasMedia() {
+		returnMsg, err = s.bot.EditMessageMedia(ctx, &bot.EditMessageMediaParams{
+			ChatID:      chatID,
+			MessageID:   int(msgID),
+			Media:       msg.createInputFile(),
+			ReplyMarkup: createInlineKeyboard(msg),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("edit Telegram media: %w", err)
+		}
+	} else if len(msg.Text) > 0 {
 		returnMsg, err = s.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:             chatID,
 			MessageID:          int(msgID),
@@ -476,18 +486,6 @@ func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Mes
 			} else {
 				return nil, fmt.Errorf("edit Telegram message: %w", err)
 			}
-		}
-	}
-
-	if msg.hasMedia() {
-		returnMsg, err = s.bot.EditMessageMedia(ctx, &bot.EditMessageMediaParams{
-			ChatID:      chatID,
-			MessageID:   int(msgID),
-			Media:       msg.createInputFile(),
-			ReplyMarkup: createInlineKeyboard(msg),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("edit Telegram media: %w", err)
 		}
 	}
 
