@@ -47,6 +47,7 @@ func createInlineKeyboard(msg Message) any {
 					row = append(row, models.InlineKeyboardButton{
 						Text:         btn.Text,
 						URL:          btn.URL,
+						WebApp:       createWebAppInfo(button.WebAppURL),
 						CallbackData: btn.CallbackData,
 					})
 				}
@@ -57,6 +58,7 @@ func createInlineKeyboard(msg Message) any {
 					{
 						Text:         button.Text,
 						URL:          button.URL,
+						WebApp:       createWebAppInfo(button.WebAppURL),
 						CallbackData: button.CallbackData,
 					},
 				})
@@ -139,4 +141,14 @@ func downloadFile(url string) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+func createWebAppInfo(url string) *models.WebAppInfo {
+	if len(url) == 0 {
+		return nil
+	}
+
+	return &models.WebAppInfo{
+		URL: url,
+	}
 }

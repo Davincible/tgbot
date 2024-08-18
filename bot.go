@@ -320,6 +320,7 @@ type InlineButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
 	URL          string `json:"url"`
+	WebAppURL    string `json:"web_app"`
 
 	Row []InlineButton `json:"row,omitempty"`
 }
