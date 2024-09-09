@@ -82,7 +82,8 @@ type Config struct {
 	UseWebhook    bool
 	Polling       bool
 	// SkipGetMe skips the GetMe call on bot creation.
-	SkippGetMe bool
+	SkippGetMe         bool
+	UseTestEnvironment bool
 }
 
 type Service struct {
@@ -120,6 +121,10 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 				slog.String("bot", username),
 			)
 		}),
+	}
+
+	if cfg.UseTestEnvironment {
+		options = append(options, bot.UseTestEnvironment())
 	}
 
 	if cfg.Bot != nil {
