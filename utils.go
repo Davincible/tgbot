@@ -45,7 +45,7 @@ func createInlineKeyboard(msg Message) any {
 
 				for _, btn := range button.Row {
 					row = append(row, models.InlineKeyboardButton{
-						Text:         btn.Text,
+						Text:         strings.TrimSpace(btn.Text),
 						URL:          btn.URL,
 						WebApp:       createWebAppInfo(button.WebAppURL),
 						CallbackData: btn.CallbackData,
@@ -56,7 +56,7 @@ func createInlineKeyboard(msg Message) any {
 			} else {
 				buttons = append(buttons, []models.InlineKeyboardButton{
 					{
-						Text:         button.Text,
+						Text:         strings.TrimSpace(button.Text),
 						URL:          button.URL,
 						WebApp:       createWebAppInfo(button.WebAppURL),
 						CallbackData: button.CallbackData,
