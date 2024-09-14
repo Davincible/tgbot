@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Davincible/cache"
 	"github.com/gammazero/workerpool"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -92,7 +93,8 @@ type Service struct {
 	bot    *bot.Bot
 	pool   *workerpool.WorkerPool
 
-	username string
+	username  string
+	fileCache *cache.Cache[[]byte]
 }
 
 func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
@@ -176,12 +178,18 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 		username = self.Username
 	}
 
+	fileCache, err := cache.New[[]byte](&cache.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file cache: %w", err)
+	}
+
 	srv := Service{
-		cfg:      cfg,
-		logger:   logger,
-		bot:      b,
-		pool:     workerpool.New(50),
-		username: username,
+		cfg:       cfg,
+		logger:    logger,
+		bot:       b,
+		pool:      workerpool.New(50),
+		username:  username,
+		fileCache: fileCache,
 	}
 
 	if cfg.Bot != nil {
@@ -273,6 +281,50 @@ type Message struct {
 	DisableLinkPreview bool
 }
 
+func (s *Service) downloadURLs(msg Message) error {
+	if len(msg.VideoURL) > 0 {
+		video, err := s.downloadFile(msg.VideoURL)
+		if err != nil {
+			return fmt.Errorf("download video: %w", err)
+		}
+
+		msg.Video = video
+		msg.VideoURL = ""
+	}
+
+	if len(msg.AudioURL) > 0 {
+		audio, err := s.downloadFile(msg.AudioURL)
+		if err != nil {
+			return fmt.Errorf("download audio: %w", err)
+		}
+
+		msg.Audio = audio
+		msg.AudioURL = ""
+	}
+
+	if len(msg.ImageURL) > 0 {
+		image, err := s.downloadFile(msg.ImageURL)
+		if err != nil {
+			return fmt.Errorf("download image: %w", err)
+		}
+
+		msg.Image = image
+		msg.ImageURL = ""
+	}
+
+	if len(msg.DocumentURL) > 0 {
+		doc, err := s.downloadFile(msg.DocumentURL)
+		if err != nil {
+			return fmt.Errorf("download document: %w", err)
+		}
+
+		msg.Document = doc
+		msg.DocumentURL = ""
+	}
+
+	return nil
+}
+
 // hasMedia returns true if the message has any media attachments.
 func (m Message) hasMedia() bool {
 	return m.VideoURL != "" || m.AudioURL != "" || m.ImageURL != "" ||
@@ -351,6 +403,10 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 		}
 		return err
 	}
+
+	// if err := s.downloadURLs(msg); err != nil {
+	// 	return nil, fmt.Errorf("download URLs: %w", err)
+	// }
 
 	var replyParams *models.ReplyParameters
 	if msg.ReplyTo > 0 {
@@ -452,6 +508,10 @@ func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Mes
 		}
 	}
 
+	// if err := s.downloadURLs(msg); err != nil {
+	// 	return nil, fmt.Errorf("download URLs: %w", err)
+	// }
+
 	var returnMsg *models.Message
 	var err error
 
@@ -550,7 +610,7 @@ func (s *Service) DownloadFile(fileID any) ([]byte, error) {
 		return nil, fmt.Errorf("get file: %w", err)
 	}
 
-	body, err := downloadFile(fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.cfg.Token, file.FilePath))
+	body, err := s.downloadFile(fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", s.cfg.Token, file.FilePath))
 	if err != nil {
 		return nil, fmt.Errorf("download file: %w", err)
 	}
@@ -576,8 +636,6 @@ func (s *Service) GetMe() (*models.User, error) {
 }
 
 func (s *Service) GetProfilePhoto(chatID int64) ([]byte, error) {
-	fmt.Println("CHECKING PICTURE:", chatID)
-
 	var fileID string
 	p, err := s.bot.GetUserProfilePhotos(context.Background(), &bot.GetUserProfilePhotosParams{
 		UserID: chatID,

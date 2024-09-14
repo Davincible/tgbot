@@ -123,7 +123,12 @@ var httpClient = &http.Client{
 	Timeout: time.Second * 20,
 }
 
-func downloadFile(url string) ([]byte, error) {
+func (s *Service) downloadFile(url string) ([]byte, error) {
+	file, ok := s.fileCache.Get(url)
+	if ok {
+		return file, nil
+	}
+
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, err
@@ -139,6 +144,8 @@ func downloadFile(url string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("received status code %d from server: %s", resp.StatusCode, body)
 	}
+
+	s.fileCache.Set(url, body)
 
 	return body, nil
 }
