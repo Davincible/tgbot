@@ -58,6 +58,7 @@ type Sender interface {
 	EditMessage(chatID int64, msgID int, msg Message) (*models.Message, error)
 	DeleteMessage(chatID int64, msgID int) error
 	DownloadFile(fileID any) ([]byte, error)
+	GetProfilePhoto(chatID int64) ([]byte, error)
 	BotUsername() string
 }
 
