@@ -1,6 +1,7 @@
 package tgbot
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -62,4 +63,22 @@ func TestEditMessage(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, edited, editedMessage.Caption)
 	})
+}
+
+func TestDownloadFile(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{}))
+
+	srv, err := NewService(logger, &Config{Token: botToken})
+	require.NoError(t, err)
+
+	fileID := "rc-upload-1728075721688-2"
+
+	data, err := srv.DownloadFile(fileID)
+	require.NoError(t, err)
+
+	if len(data) == 0 {
+		t.Error("File is empty")
+	}
+
+	fmt.Println(data[:50])
 }
