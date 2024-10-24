@@ -48,6 +48,10 @@ type Config struct {
 
 	// Database configuration
 	DatabaseConfig DatabaseConfig `json:"database" yaml:"database"`
+
+	NoAutoAuth bool `json:"no_auto_auth" yaml:"no_auto_auth"`
+
+	AuthConversator gotgproto.AuthConversator
 }
 
 // DatabaseConfig holds database configuration
@@ -102,16 +106,15 @@ func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
 		handlers: make([]UpdateHandler, 0),
 	}
 
-	if err := client.initialize(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("initialization failed: %w", err)
+	if err := client.initialize(cfg); err != nil {
+		return client, fmt.Errorf("initialization failed: %w", err)
 	}
 
 	return client, nil
 }
 
 // Initialize sets up the client's dependencies
-func (c *Client) initialize() error {
+func (c *Client) initialize(cfg *Config) error {
 	// Initialize database
 	db, err := c.setupDatabase()
 	if err != nil {
@@ -126,6 +129,8 @@ func (c *Client) initialize() error {
 		SystemLangCode:   "en",
 		ClientLangCode:   "en",
 		DisableCopyright: true,
+		NoAutoAuth:       cfg.NoAutoAuth,
+		AuthConversator:  cfg.AuthConversator,
 	}
 
 	// Create Telegram client
@@ -135,14 +140,11 @@ func (c *Client) initialize() error {
 		gotgproto.ClientTypePhone(c.cfg.Phone),
 		opts,
 	)
-	if err != nil {
-		return fmt.Errorf("create client: %w", err)
-	}
 
 	c.client = client
 	c.dispatcher = client.Dispatcher
 
-	return nil
+	return err
 }
 
 // Stop gracefully stops the client
@@ -176,6 +178,11 @@ type UpdateHandler interface {
 
 // AddHandler adds an update handler to the client
 func (c *Client) AddHandler(handler UpdateHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.handlers = append(c.handlers, handler)
+
 	c.client.Dispatcher.AddHandler(HandlerFunc(handler.HandleUpdate))
 }
 

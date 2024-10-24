@@ -7,9 +7,17 @@ import (
 	"testing"
 
 	"github.com/joho/godotenv"
-	"github.com/sanity-io/litter"
 	"github.com/test-go/testify/require"
 	"golang.org/x/exp/slog"
+
+	"github.com/Davincible/tgbot"
+	"github.com/Davincible/tgbot/bots/loginbot"
+)
+
+var (
+	chats = map[string]int64{
+		"david": 739125269,
+	}
 )
 
 func init() {
@@ -40,13 +48,29 @@ func setupTestLogger() *slog.Logger {
 
 func TestLogin(t *testing.T) {
 	logger := setupTestLogger()
-	config := setupTestConfig()
 
-	litter.Dump(config)
+	loginBot := loginbot.New(logger, loginbot.Config{})
+	tgSrv, err := tgbot.NewService(logger, &tgbot.Config{
+		Bot:     loginBot,
+		Token:   getEnv("TELEGRAM_BOT_TOKEN"),
+		Polling: true,
+	})
+	require.NoError(t, err, "Setup telegram service")
+	defer tgSrv.Close()
 
 	t.Log("TestLogin: Setup NewClient")
 
-	client, err := NewClient(logger, config)
+	client, err := NewClient(logger, &Config{
+		AppID:           getEnvInt("TELEGRAM_APP_ID"),
+		APIHash:         getEnv("TELEGRAM_API_HASH"),
+		Phone:           getEnv("TELEGRAM_PHONE"),
+		AuthConversator: loginBot.NewConversator(chats["david"], getEnv("TELEGRAM_PHONE")),
+		DatabaseConfig: DatabaseConfig{
+			Type:     "sqlite",
+			DSN:      ":memory:",
+			MaxConns: 10,
+		},
+	})
 	require.NoError(t, err, "Setup NewClient")
 
 	client.WaitUntilLoggedIn()
