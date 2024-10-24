@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/test-go/testify/require"
@@ -17,6 +18,10 @@ import (
 var (
 	chats = map[string]int64{
 		"david": 739125269,
+	}
+
+	channels = map[string]int64{
+		"solEarlyTrending": 2093384030,
 	}
 )
 
@@ -46,10 +51,11 @@ func setupTestLogger() *slog.Logger {
 	}))
 }
 
-func TestLogin(t *testing.T) {
-	logger := setupTestLogger()
+var logger = setupTestLogger()
 
+func setupTestClient(t *testing.T) *Client {
 	loginBot := loginbot.New(logger, loginbot.Config{})
+
 	tgSrv, err := tgbot.NewService(logger, &tgbot.Config{
 		Bot:     loginBot,
 		Token:   getEnv("TELEGRAM_BOT_TOKEN"),
@@ -58,22 +64,40 @@ func TestLogin(t *testing.T) {
 	require.NoError(t, err, "Setup telegram service")
 	defer tgSrv.Close()
 
-	t.Log("TestLogin: Setup NewClient")
-
 	client, err := NewClient(logger, &Config{
 		AppID:           getEnvInt("TELEGRAM_APP_ID"),
 		APIHash:         getEnv("TELEGRAM_API_HASH"),
 		Phone:           getEnv("TELEGRAM_PHONE"),
 		AuthConversator: loginBot.NewConversator(chats["david"], getEnv("TELEGRAM_PHONE")),
+		NoBlockInit:     true,
 		DatabaseConfig: DatabaseConfig{
 			Type:     "sqlite",
-			DSN:      ":memory:",
+			DSN:      "./test.db",
 			MaxConns: 10,
 		},
 	})
 	require.NoError(t, err, "Setup NewClient")
 
+	fmt.Println("Waiting for client to log in")
+
 	client.WaitUntilLoggedIn()
+
+	return client
+}
+
+func TestLogin(t *testing.T) {
+	setupTestClient(t)
+}
+
+func TestGetMessages(t *testing.T) {
+	client := setupTestClient(t)
+
+	messages, err := client.GetChannelMessages(channels["solEarlyTrending"], &ChannelMessagesOptions{
+		MinDate: time.Now().Add(-24 * time.Hour * 1),
+	})
+	require.NoError(t, err, "GetMessages failed")
+
+	t.Logf("Messages: %v", len(messages))
 }
 
 func getEnv(name string, fallback ...string) string {

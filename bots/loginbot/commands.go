@@ -20,7 +20,7 @@ func (b *Bot) CommandsList() []models.BotCommand {
 }
 
 func (b *Bot) DefaultHandler() tBot.HandlerFunc {
-	return b.handleMessage
+	return func(ctx context.Context, bot *tBot.Bot, update *models.Update) {}
 }
 
 func (b *Bot) LoginMiddlware() tBot.Middleware {

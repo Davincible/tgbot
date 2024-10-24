@@ -51,6 +51,8 @@ type Config struct {
 
 	NoAutoAuth bool `json:"no_auto_auth" yaml:"no_auto_auth"`
 
+	NoBlockInit bool `json:"no_block_init" yaml:"no_block_init"`
+
 	AuthConversator gotgproto.AuthConversator
 }
 
@@ -106,8 +108,16 @@ func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
 		handlers: make([]UpdateHandler, 0),
 	}
 
-	if err := client.initialize(cfg); err != nil {
-		return client, fmt.Errorf("initialization failed: %w", err)
+	if cfg.NoBlockInit {
+		if err := client.initialize(cfg); err != nil {
+			return client, fmt.Errorf("initialization failed: %w", err)
+		}
+	} else {
+		go func() {
+			if err := client.initialize(cfg); err != nil {
+				logger.Error("initialization failed", slog.String("err", err.Error()))
+			}
+		}()
 	}
 
 	return client, nil

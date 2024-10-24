@@ -22,6 +22,7 @@ type BotMerger struct {
 	config     MergerConfig
 
 	defaultHandlers []bot.HandlerFunc
+	setSenders      []func(s Sender)
 }
 
 // MergerConfig defines the configuration for the bot merger
@@ -88,6 +89,7 @@ func (m *BotMerger) mergeBot(bot Bot) error {
 
 	m.middleware = append(m.middleware, bot.Middleware()...)
 	m.defaultHandlers = append(m.defaultHandlers, bot.DefaultHandler())
+	m.setSenders = append(m.setSenders, bot.SetSender)
 
 	// Set the sender on the merged bot
 	if m.sender != nil {
@@ -176,7 +178,12 @@ func (m *BotMerger) handleCallbackConflict(pattern string, newCallback, existing
 func (m *BotMerger) SetSender(s Sender) {
 	m.Lock()
 	defer m.Unlock()
+
 	m.sender = s
+
+	for _, setSender := range m.setSenders {
+		setSender(s)
+	}
 }
 
 func (m *BotMerger) Commands() map[string]func(ctx context.Context, b *bot.Bot, update *models.Update) {

@@ -25,10 +25,15 @@ func (b *Bot) NewConversator(chatID int64, phone string) *Conversator {
 		logger: b.logger,
 		bot:    b,
 		user:   chatID,
+		phone:  phone,
 	}
 }
 
 func (c *Conversator) AskPhoneNumber() (string, error) {
+	c.logger.Debug("Asking phone number",
+		slog.Int64("user", c.user),
+	)
+
 	phone, err := c.bot.AskPhone(c.user)
 	if err != nil {
 		c.logger.Error("failed to ask phone number",
@@ -43,6 +48,10 @@ func (c *Conversator) AskPhoneNumber() (string, error) {
 }
 
 func (c *Conversator) AskCode() (string, error) {
+	c.logger.Debug("Asking code",
+		slog.Int64("user", c.user),
+	)
+
 	code, err := c.bot.SendCodeRequest(c.user)
 	if err != nil {
 		c.logger.Error("failed to ask code",
@@ -57,6 +66,10 @@ func (c *Conversator) AskCode() (string, error) {
 }
 
 func (c *Conversator) AskPassword() (string, error) {
+	c.logger.Debug("Asking 2FA password",
+		slog.Int64("user", c.user),
+	)
+
 	code, err := c.bot.Ask2FACode(c.user)
 	if err != nil {
 		c.logger.Error("failed to ask 2fa code",
@@ -78,18 +91,24 @@ func (c *Conversator) AskPassword() (string, error) {
 func (c *Conversator) AuthStatus(authStatus gotgproto.AuthStatus) {
 	var msg *tgbot.Message
 
-	c.logger.Info("Telegram Login Auth Status",
-		slog.String("event", string(authStatus.Event)),
-		slog.Int("attempts_left", authStatus.AttemptsLeft),
-	)
-
 	switch authStatus.Event {
 	case gotgproto.AuthStatusSuccess:
 		msg = &tgbot.Message{
 			Text:           fmt.Sprintf(loginSuccessMsg, c.phone),
 			TextFormatting: true,
 		}
+	case gotgproto.AuthStatusFloodWait:
+		c.logger.Debug("Telegram Login Auth Timeout",
+			slog.String("event", string(authStatus.Event)),
+			slog.Time("until", authStatus.Timeout),
+		)
+		return
 	}
+
+	c.logger.Debug("Telegram Login Auth Status",
+		slog.String("event", string(authStatus.Event)),
+		slog.Int("attempts_left", authStatus.AttemptsLeft),
+	)
 
 	if msg == nil {
 		return
@@ -103,6 +122,11 @@ func (c *Conversator) AuthStatus(authStatus gotgproto.AuthStatus) {
 }
 
 func (c *Conversator) RetryPassword(attemptsLeft int) (string, error) {
+	c.logger.Debug("Retrying 2FA password",
+		slog.Int("attempts_left", attemptsLeft),
+		slog.Int64("user", c.user),
+	)
+
 	code, err := c.bot.Ask2FACode(c.user, attemptsLeft)
 	if err != nil {
 		c.logger.Error("failed to ask 2fa code",
