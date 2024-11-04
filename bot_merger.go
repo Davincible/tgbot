@@ -3,7 +3,6 @@ package tgbot
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/go-telegram/bot"
@@ -14,12 +13,13 @@ import (
 // BotMerger implements both a merger utility and the Bot interface
 type BotMerger struct {
 	sync.RWMutex
-	commands   map[string]func(ctx context.Context, b *bot.Bot, update *models.Update)
-	callbacks  map[string]CallBack
-	middleware []bot.Middleware
-	sender     Sender
-	logger     *slog.Logger
-	config     MergerConfig
+	commands     map[string]func(ctx context.Context, b *bot.Bot, update *models.Update)
+	callbacks    map[string]CallBack
+	middleware   []bot.Middleware
+	sender       Sender
+	logger       *slog.Logger
+	config       MergerConfig
+	commandsList []models.BotCommand
 
 	defaultHandlers []bot.HandlerFunc
 	setSenders      []func(s Sender)
@@ -56,11 +56,12 @@ func NewBotMerger(config MergerConfig) (*BotMerger, error) {
 	}
 
 	return &BotMerger{
-		commands:   make(map[string]func(ctx context.Context, b *bot.Bot, update *models.Update)),
-		callbacks:  make(map[string]CallBack),
-		middleware: make([]bot.Middleware, 0),
-		logger:     config.Logger,
-		config:     config,
+		commands:     make(map[string]func(ctx context.Context, b *bot.Bot, update *models.Update)),
+		callbacks:    make(map[string]CallBack),
+		middleware:   make([]bot.Middleware, 0),
+		logger:       config.Logger,
+		config:       config,
+		commandsList: make([]models.BotCommand, 0),
 	}, nil
 }
 
@@ -82,6 +83,9 @@ func (m *BotMerger) mergeBot(bot Bot) error {
 	if err := m.mergeCommands(bot.Commands()); err != nil {
 		return err
 	}
+
+	// Merge command list
+	m.mergeCommandsList(bot.CommandsList())
 
 	if err := m.mergeCallbacks(bot.CallBacks()); err != nil {
 		return err
@@ -173,6 +177,47 @@ func (m *BotMerger) handleCallbackConflict(pattern string, newCallback, existing
 	return nil
 }
 
+func (m *BotMerger) mergeCommandsList(newCommands []models.BotCommand) {
+	for _, cmd := range newCommands {
+		shouldAdd := true
+
+		// Check for existing command
+		for _, existing := range m.commandsList {
+			if existing.Command == cmd.Command {
+				shouldAdd = false
+
+				// Handle conflict based on strategy
+				switch m.config.ConflictStrategy {
+				case KeepOriginal:
+					m.logger.Info("keeping original command in list",
+						slog.String("command", cmd.Command))
+				case ReplaceWithNew:
+					// Replace the existing command description
+					existing.Description = cmd.Description
+					m.logger.Info("replaced command description in list",
+						slog.String("command", cmd.Command))
+				case SuffixConflicting:
+					// Add suffixed command to list
+					suffixedCmd := cmd
+					suffixedCmd.Command = cmd.Command + m.config.DefaultSuffix
+					m.commandsList = append(m.commandsList, suffixedCmd)
+					m.logger.Info("added suffixed command to list",
+						slog.String("original", cmd.Command),
+						slog.String("suffixed", suffixedCmd.Command))
+				}
+				break
+			}
+		}
+
+		// Add new command if no conflict or if using suffix strategy
+		if shouldAdd && m.config.ConflictStrategy != SuffixConflicting {
+			m.commandsList = append(m.commandsList, cmd)
+			m.logger.Info("added new command to list",
+				slog.String("command", cmd.Command))
+		}
+	}
+}
+
 // Bot interface implementation
 
 func (m *BotMerger) SetSender(s Sender) {
@@ -195,15 +240,7 @@ func (m *BotMerger) Commands() map[string]func(ctx context.Context, b *bot.Bot, 
 func (m *BotMerger) CommandsList() []models.BotCommand {
 	m.RLock()
 	defer m.RUnlock()
-
-	var list []models.BotCommand
-	for cmd := range m.commands {
-		list = append(list, models.BotCommand{
-			Command:     strings.TrimSuffix(cmd, "/"),
-			Description: fmt.Sprintf("Merged command: %s", cmd),
-		})
-	}
-	return list
+	return m.commandsList
 }
 
 func (m *BotMerger) CallBacks() map[string]CallBack {
