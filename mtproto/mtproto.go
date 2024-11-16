@@ -12,12 +12,12 @@ import (
 	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/sessionMaker"
+	"github.com/celestix/gotgproto/storage"
 	"github.com/sanity-io/litter"
 	"golang.org/x/exp/slog"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
 )
 
 // Common errors returned by the client
@@ -109,15 +109,15 @@ func NewClient(logger *slog.Logger, cfg *Config) (*Client, error) {
 	}
 
 	if cfg.NoBlockInit {
-		if err := client.initialize(cfg); err != nil {
-			return client, fmt.Errorf("initialization failed: %w", err)
-		}
-	} else {
 		go func() {
 			if err := client.initialize(cfg); err != nil {
 				logger.Error("initialization failed", slog.String("err", err.Error()))
 			}
 		}()
+	} else {
+		if err := client.initialize(cfg); err != nil {
+			return client, fmt.Errorf("initialization failed: %w", err)
+		}
 	}
 
 	return client, nil
@@ -153,6 +153,10 @@ func (c *Client) initialize(cfg *Config) error {
 
 	c.client = client
 	c.dispatcher = client.Dispatcher
+
+	for _, handler := range c.handlers {
+		c.dispatcher.AddHandler(HandlerFunc(handler.HandleUpdate))
+	}
 
 	return err
 }
@@ -193,7 +197,9 @@ func (c *Client) AddHandler(handler UpdateHandler) {
 
 	c.handlers = append(c.handlers, handler)
 
-	c.client.Dispatcher.AddHandler(HandlerFunc(handler.HandleUpdate))
+	if c.client != nil && c.client.Dispatcher != nil {
+		c.client.Dispatcher.AddHandler(HandlerFunc(handler.HandleUpdate))
+	}
 }
 
 // Helper functions
@@ -207,16 +213,11 @@ func (c *Client) setupDatabase() (*gorm.DB, error) {
 		dialector = sqlite.Open(c.cfg.DatabaseConfig.DSN)
 	}
 
-	gormConfig := &gorm.Config{}
-
 	if c.cfg.DatabaseConfig.TablePrefix != "" {
-		fmt.Println("Setting table prefix", c.cfg.DatabaseConfig.TablePrefix)
-		gormConfig.NamingStrategy = schema.NamingStrategy{
-			TablePrefix: c.cfg.DatabaseConfig.TablePrefix,
-		}
+		storage.DefaultStorageConfig.Database.TablePrefix = c.cfg.DatabaseConfig.TablePrefix
 	}
 
-	db, err := gorm.Open(dialector, gormConfig)
+	db, err := gorm.Open(dialector, &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

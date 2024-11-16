@@ -88,6 +88,8 @@ func (m Message) createInputFile() models.InputMedia {
 }
 
 func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
+	s.ratelimit.Take()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -202,6 +204,8 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 }
 
 func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Message, error) {
+	s.ratelimit.Take()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

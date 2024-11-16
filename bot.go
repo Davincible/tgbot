@@ -14,6 +14,7 @@ import (
 	"github.com/gammazero/workerpool"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"go.uber.org/ratelimit"
 	"golang.org/x/exp/slog"
 )
 
@@ -70,6 +71,7 @@ type Service struct {
 	pool      *workerpool.WorkerPool
 	username  string
 	fileCache *cache.Cache[[]byte]
+	ratelimit ratelimit.Limiter
 }
 
 // NewService creates a new telegram service instance
@@ -95,6 +97,7 @@ func NewService(logger *slog.Logger, cfg *Config) (*Service, error) {
 		pool:      workerpool.New(defaultWorkerPoolSize),
 		username:  username,
 		fileCache: fileCache,
+		ratelimit: ratelimit.New(30),
 	}
 
 	if err := srv.setupBot(); err != nil {

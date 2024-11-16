@@ -104,12 +104,15 @@ type ChannelMessagesOptions struct {
 	MinMessages int       // Minimum number of messages to fetch
 	MinDate     time.Time // Only fetch messages after this date
 	BatchSize   int       // Number of messages per batch (max 100)
+	Sleep       time.Duration
+	Hook        func(msg *tg.Message) bool
 }
 
 // Default options when none are provided
 var defaultChannelMessagesOptions = ChannelMessagesOptions{
 	MinMessages: 99,
 	BatchSize:   100,
+	Sleep:       time.Millisecond * 500,
 }
 
 // GetChannelMessages fetches messages from a channel according to provided options
@@ -153,6 +156,15 @@ func (c *Client) GetChannelMessages(chatID int64, opts *ChannelMessagesOptions) 
 			filtered = append(filtered, msg)
 		}
 
+		if opts.Hook != nil {
+			for _, msg := range filtered {
+				if opts.Hook(msg) {
+					done = true
+					break
+				}
+			}
+		}
+
 		allMessages = append(allMessages, filtered...)
 
 		// Update logging
@@ -178,10 +190,8 @@ func (c *Client) GetChannelMessages(chatID int64, opts *ChannelMessagesOptions) 
 			offsetID = messages[len(messages)-1].ID
 		}
 
-		time.Sleep(time.Millisecond * 500) // Respect rate limits
+		time.Sleep(opts.Sleep) // Respect rate limits
 	}
-
-	fmt.Println("Last message date:", lastMsgDate)
 
 	return allMessages, nil
 }
@@ -198,13 +208,8 @@ func (c *Client) getChannelMessagesBatch(chatID int64, offsetID, limit int) ([]*
 			ChannelID:  chatID,
 			AccessHash: inputChannel.AccessHash,
 		},
-		OffsetID:   offsetID,
-		OffsetDate: 0,
-		AddOffset:  0,
-		Limit:      limit,
-		MaxID:      0,
-		MinID:      0,
-		Hash:       0,
+		OffsetID: offsetID,
+		Limit:    limit,
 	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("get channel messages: %w", err)
