@@ -25,12 +25,14 @@ func createInputFile(filename string, data []byte, url string) models.InputFile 
 	return &models.InputFileString{Data: url}
 }
 
-func getParseMode(textFormatting bool) models.ParseMode {
-	if textFormatting {
+func getParseMode(msg Message) models.ParseMode {
+	if msg.HTMLFormatting {
+		return models.ParseModeHTML
+	}
+	if msg.TextFormatting {
 		return models.ParseModeMarkdown
 	}
-	// var parseMode models.ParseMode
-	// return parseMode
+	// Default to Markdown for backward compatibility
 	return models.ParseModeMarkdown
 }
 

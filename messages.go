@@ -36,7 +36,88 @@ type Message struct {
 	Buttons            []InlineButton
 	ReplyTo            int
 	TextFormatting     bool
+	HTMLFormatting     bool // Enable HTML formatting instead of Markdown
 	DisableLinkPreview bool
+	ReplyToParams      *models.ReplyParameters
+}
+
+func (m *Message) validateButtons() error {
+	isCallbackTooBig := func(s string) bool {
+		return len([]byte(s)) > 64
+	}
+
+	for _, button := range m.Buttons {
+		if isCallbackTooBig(button.CallbackData) {
+			return fmt.Errorf("callback_data is too big (%d bytes) for button %s: '%s'", len([]byte(button.CallbackData)), button.Text, button.CallbackData)
+		}
+
+		for _, rowButton := range button.Row {
+			if isCallbackTooBig(rowButton.CallbackData) {
+				return fmt.Errorf("callback_data is too big (%d bytes) for button %s: '%s'", len([]byte(rowButton.CallbackData)), rowButton.Text, rowButton.CallbackData)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *Message) buttons() string {
+	var debugStrings []string
+
+	for _, button := range m.Buttons {
+		var buttonDebug string
+
+		// Always include Text if available
+		if button.Text != "" {
+			buttonDebug = fmt.Sprintf("text: %s", strings.ToLower(button.Text))
+		}
+
+		// Check for exactly one additional field or mention no additional field
+		if button.CallbackData != "" {
+			buttonDebug = fmt.Sprintf("%s, callback_data: %s", buttonDebug, strings.ToLower(button.CallbackData))
+		} else if button.URL != "" {
+			buttonDebug = fmt.Sprintf("%s, url: %s", buttonDebug, strings.ToLower(button.URL))
+		} else if button.WebAppURL != "" {
+			buttonDebug = fmt.Sprintf("%s, web_app_url: %s", buttonDebug, strings.ToLower(button.WebAppURL))
+		} else {
+			buttonDebug = fmt.Sprintf("%s, no additional field", buttonDebug)
+		}
+
+		// Handle row buttons (nested buttons)
+		if len(button.Row) > 0 {
+			rowDebugs := []string{}
+			for _, rowButton := range button.Row {
+				var rowDebug string
+
+				// Always include Text if available
+				if rowButton.Text != "" {
+					rowDebug = fmt.Sprintf("text: %s", strings.ToLower(rowButton.Text))
+				}
+
+				// Check for exactly one additional field or mention no additional field
+				if rowButton.CallbackData != "" {
+					rowDebug = fmt.Sprintf("%s, callback_data: %s", rowDebug, strings.ToLower(rowButton.CallbackData))
+				} else if rowButton.URL != "" {
+					rowDebug = fmt.Sprintf("%s, url: %s", rowDebug, strings.ToLower(rowButton.URL))
+				} else if rowButton.WebAppURL != "" {
+					rowDebug = fmt.Sprintf("%s, web_app_url: %s", rowDebug, strings.ToLower(rowButton.WebAppURL))
+				} else {
+					rowDebug = fmt.Sprintf("%s, no additional field", rowDebug)
+				}
+
+				rowDebugs = append(rowDebugs, fmt.Sprintf("{%s}", rowDebug))
+			}
+
+			// Add row debug info to the main button debug
+			buttonDebug = fmt.Sprintf("%s, row: [%s]", buttonDebug, strings.Join(rowDebugs, ", "))
+		}
+
+		// Add the button's debug string to the overall debug list
+		debugStrings = append(debugStrings, fmt.Sprintf("{%s}", buttonDebug))
+	}
+
+	// Join all button strings into a single debug output
+	return strings.Join(debugStrings, "\n")
 }
 
 // hasMedia returns true if the message has any media attachments.
@@ -51,8 +132,8 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Image) > 0 || m.ImageURL != "" {
 		return &models.InputMediaPhoto{
 			Media:           m.ImageURL,
-			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
-			ParseMode:       getParseMode(m.TextFormatting),
+			Caption:         FormatText(m),
+			ParseMode:       getParseMode(m),
 			CaptionEntities: m.Entities,
 		}
 	}
@@ -60,8 +141,8 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Video) > 0 || m.VideoURL != "" {
 		return &models.InputMediaVideo{
 			Media:           m.VideoURL,
-			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
-			ParseMode:       getParseMode(m.TextFormatting),
+			Caption:         FormatText(m),
+			ParseMode:       getParseMode(m),
 			CaptionEntities: m.Entities,
 		}
 	}
@@ -69,8 +150,8 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Audio) > 0 || m.AudioURL != "" {
 		return &models.InputMediaAudio{
 			Media:           m.AudioURL,
-			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
-			ParseMode:       getParseMode(m.TextFormatting),
+			Caption:         FormatText(m),
+			ParseMode:       getParseMode(m),
 			CaptionEntities: m.Entities,
 		}
 	}
@@ -78,8 +159,8 @@ func (m Message) createInputFile() models.InputMedia {
 	if len(m.Document) > 0 || m.DocumentURL != "" {
 		return &models.InputMediaDocument{
 			Media:           m.DocumentURL,
-			Caption:         EscapeMarkdown(m.Text, m.TextFormatting),
-			ParseMode:       getParseMode(m.TextFormatting),
+			Caption:         FormatText(m),
+			ParseMode:       getParseMode(m),
 			CaptionEntities: m.Entities,
 		}
 	}
@@ -99,7 +180,9 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 			s.logger.Error("Error sending message",
 				slog.String("err", err.Error()),
 				slog.String("type", msgType),
-				slog.String("text", EscapeMarkdown(msg.Text, msg.TextFormatting)),
+				slog.Int64("chat_id", chatID),
+				slog.String("text", FormatText(msg)),
+				"buttons", msg.buttons(),
 			)
 
 			if strings.Contains(err.Error(), "too long") {
@@ -111,13 +194,16 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 		return err
 	}
 
+	if err := msg.validateButtons(); err != nil {
+		return nil, fmt.Errorf("validate buttons: %w", err)
+	}
+
 	// if err := s.downloadURLs(msg); err != nil {
 	// 	return nil, fmt.Errorf("download URLs: %w", err)
 	// }
 
-	var replyParams *models.ReplyParameters
 	if msg.ReplyTo > 0 {
-		replyParams = &models.ReplyParameters{
+		msg.ReplyToParams = &models.ReplyParameters{
 			ChatID:                   chatID,
 			MessageID:                msg.ReplyTo,
 			AllowSendingWithoutReply: true,
@@ -132,10 +218,10 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 		if returnMsg, err = s.bot.SendPhoto(ctx, &bot.SendPhotoParams{
 			ChatID:          chatID,
 			Photo:           createInputFile("image.jpg", msg.Image, msg.ImageURL),
-			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
-			ParseMode:       getParseMode(msg.TextFormatting),
+			Caption:         FormatText(msg),
+			ParseMode:       getParseMode(msg),
 			ReplyMarkup:     createInlineKeyboard(msg),
-			ReplyParameters: replyParams,
+			ReplyParameters: msg.ReplyToParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
 			return returnMsg, handleErr("image", err)
@@ -144,10 +230,10 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 		if returnMsg, err = s.bot.SendVideo(ctx, &bot.SendVideoParams{
 			ChatID:          chatID,
 			Video:           createInputFile("video.mp4", msg.Video, msg.VideoURL),
-			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
-			ParseMode:       getParseMode(msg.TextFormatting),
+			Caption:         FormatText(msg),
+			ParseMode:       getParseMode(msg),
 			ReplyMarkup:     createInlineKeyboard(msg),
-			ReplyParameters: replyParams,
+			ReplyParameters: msg.ReplyToParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
 			return returnMsg, handleErr("video", err)
@@ -156,10 +242,10 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 		if returnMsg, err = s.bot.SendAudio(ctx, &bot.SendAudioParams{
 			ChatID:          chatID,
 			Audio:           createInputFile("audio.mp3", msg.Audio, msg.AudioURL),
-			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
-			ParseMode:       getParseMode(msg.TextFormatting),
+			Caption:         FormatText(msg),
+			ParseMode:       getParseMode(msg),
 			ReplyMarkup:     createInlineKeyboard(msg),
-			ReplyParameters: replyParams,
+			ReplyParameters: msg.ReplyToParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
 			return returnMsg, handleErr("audio", err)
@@ -168,10 +254,10 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 		if returnMsg, err = s.bot.SendDocument(ctx, &bot.SendDocumentParams{
 			ChatID:          chatID,
 			Document:        createInputFile("file."+msg.DocumentType, msg.Document, msg.DocumentURL),
-			Caption:         EscapeMarkdown(msg.Text, msg.TextFormatting),
-			ParseMode:       getParseMode(msg.TextFormatting),
+			Caption:         FormatText(msg),
+			ParseMode:       getParseMode(msg),
 			ReplyMarkup:     createInlineKeyboard(msg),
-			ReplyParameters: replyParams,
+			ReplyParameters: msg.ReplyToParams,
 			CaptionEntities: msg.Entities,
 		}); err != nil {
 			return returnMsg, handleErr("document", err)
@@ -187,10 +273,10 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 
 		if returnMsg, err = s.bot.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:             chatID,
-			Text:               EscapeMarkdown(msg.Text, msg.TextFormatting),
-			ParseMode:          getParseMode(msg.TextFormatting),
+			Text:               FormatText(msg),
+			ParseMode:          getParseMode(msg),
 			ReplyMarkup:        createInlineKeyboard(msg),
-			ReplyParameters:    replyParams,
+			ReplyParameters:    msg.ReplyToParams,
 			Entities:           msg.Entities,
 			LinkPreviewOptions: previewOpts,
 		}); err != nil {
@@ -205,6 +291,30 @@ func (s *Service) Send(chatID int64, msg Message) (*models.Message, error) {
 
 func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Message, error) {
 	s.ratelimit.Take()
+
+	// Helper function to handle errors and log them
+	handleErr := func(msgType string, err error) error {
+		if err != nil {
+			s.logger.Error("Error sending message",
+				slog.String("err", err.Error()),
+				slog.String("type", msgType),
+				slog.Int64("chat_id", chatID),
+				slog.String("text", FormatText(msg)),
+				"buttons", msg.buttons(),
+			)
+
+			if strings.Contains(err.Error(), "too long") {
+				s.Send(chatID, Message{
+					Text: "Message is too long, try a shorter message or without attachment",
+				})
+			}
+		}
+		return err
+	}
+
+	if err := msg.validateButtons(); err != nil {
+		return nil, fmt.Errorf("validate buttons: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -232,14 +342,14 @@ func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Mes
 			ReplyMarkup: createInlineKeyboard(msg),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("edit Telegram media: %w", err)
+			return nil, handleErr("media", err)
 		}
 	} else if len(msg.Text) > 0 {
 		returnMsg, err = s.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
 			ChatID:             chatID,
 			MessageID:          int(msgID),
-			Text:               EscapeMarkdown(msg.Text, msg.TextFormatting),
-			ParseMode:          getParseMode(msg.TextFormatting),
+			Text:               FormatText(msg),
+			ParseMode:          getParseMode(msg),
 			ReplyMarkup:        createInlineKeyboard(msg),
 			Entities:           msg.Entities,
 			LinkPreviewOptions: previewOpts,
@@ -249,17 +359,17 @@ func (s *Service) EditMessage(chatID int64, msgID int, msg Message) (*models.Mes
 				returnMsg, err = s.bot.EditMessageCaption(ctx, &bot.EditMessageCaptionParams{
 					ChatID:                chatID,
 					MessageID:             int(msgID),
-					Caption:               EscapeMarkdown(msg.Text, msg.TextFormatting),
-					ParseMode:             getParseMode(msg.TextFormatting),
+					Caption:               FormatText(msg),
+					ParseMode:             getParseMode(msg),
 					CaptionEntities:       msg.Entities,
 					DisableWebPagePreview: msg.DisableLinkPreview,
 					ReplyMarkup:           createInlineKeyboard(msg),
 				})
 				if err != nil {
-					return nil, fmt.Errorf("edit Telegram caption: %w", err)
+					return nil, handleErr("caption", err)
 				}
 			} else {
-				return nil, fmt.Errorf("edit Telegram message: %w", err)
+				return nil, handleErr("text", err)
 			}
 		}
 	}

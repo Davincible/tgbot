@@ -19,6 +19,27 @@ var (
 	specialCharPairs = []rune{'*', '_', '~', '|', '[', ']', '(', ')', '`'}
 )
 
+// EscapeHTML escapes HTML characters for Telegram HTML mode.
+func EscapeHTML(text string) string {
+	// In Telegram's HTML mode, only these characters need escaping
+	text = strings.ReplaceAll(text, "&", "&amp;")
+	text = strings.ReplaceAll(text, "<", "&lt;")
+	text = strings.ReplaceAll(text, ">", "&gt;")
+	return text
+}
+
+// FormatText formats the text based on the message formatting settings
+func FormatText(msg Message) string {
+	if msg.HTMLFormatting {
+		// When HTML formatting is enabled, return the text as-is
+		// The user is responsible for properly formatting HTML and escaping special characters
+		// For example: "Price < $5" should be sent as "Price &lt; $5"
+		return msg.Text
+	}
+	// Use markdown escaping for markdown mode
+	return EscapeMarkdown(msg.Text, msg.TextFormatting)
+}
+
 // EscapeMarkdown escapes markdown characters for Telegram.
 func EscapeMarkdown(text string, allowFormatting ...bool) string {
 	var buf bytes.Buffer
